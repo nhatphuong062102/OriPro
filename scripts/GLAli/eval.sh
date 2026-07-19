@@ -38,7 +38,8 @@ do
             --is_bonder False \
             --use_refined True \
             DATASET.SUBSAMPLE_CLASSES base \
-            DATASET.NUM_SHOTS ${SHOTS}
+            DATASET.NUM_SHOTS ${SHOTS} \
+            #TEST.PER_CLASS_RESULT True \
         done
     done
 done
