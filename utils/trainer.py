@@ -117,9 +117,7 @@ class TrainerBase:
         else:
             return names_real
 
-    def save_model(
-        self, epoch, directory, is_best=False, val_result=None, model_name=""
-    ):
+    def save_model(self, epoch, directory, is_best=False, val_result=None, model_name=""):
         names = self.get_model_names()
 
         for name in names:
@@ -177,6 +175,22 @@ class TrainerBase:
                 path, self._models[name], self._optims[name],
                 self._scheds[name]
             )
+
+        first_path = osp.join(directory, names[0])
+        with open(osp.join(first_path, "checkpoint"), "r") as f:
+            model_name = f.readlines()[0].strip("\n")
+        checkpoint = load_checkpoint(osp.join(first_path, model_name))
+
+        if "rng_state" in checkpoint:
+            rng_state = checkpoint["rng_state"]
+            torch.set_rng_state(rng_state["torch"])
+            if torch.cuda.is_available() and rng_state["cuda"] is not None:
+                torch.cuda.set_rng_state_all(rng_state["cuda"])
+            np.random.set_state(rng_state["numpy"])
+            random.setstate(rng_state["python"])
+            print("Loaded RNG states")
+        else:
+            print("No RNG states in checkpoint, will use fresh seed")
 
         return start_epoch
 
