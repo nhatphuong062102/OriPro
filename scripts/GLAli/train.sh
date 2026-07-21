@@ -35,8 +35,8 @@ do
         --output-dir ${DIR} \
         --lambda_value ${lambda} \
         --topk ${topk} \
-        --is_bonder True \
-        --use_refined True \
+        --is_bonder \
+        --use_refined \
         --is_dense True \
         --is_sc True \
         TRAINER.LOCOOP.N_CTX ${NCTX} \
@@ -44,7 +44,7 @@ do
         TRAINER.LOCOOP.CLASS_TOKEN_POSITION ${CTP} \
         DATASET.NUM_SHOTS ${SHOTS} \
         DATASET.SUBSAMPLE_CLASSES base \
-        #TRAIN.CHECKPOINT_FREQ 5 \
+        TRAIN.CHECKPOINT_FREQ 5 
         #TEST.PER_CLASS_RESULT True 
     done
 done

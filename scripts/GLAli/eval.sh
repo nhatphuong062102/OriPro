@@ -35,8 +35,7 @@ do
             --load-epoch 200 \
             --config-file configs/trainers/${TRAINER}/${CFG}.yaml \
             --T ${T} \
-            --is_bonder False \
-            --use_refined True \
+            --use_refined \
             DATASET.SUBSAMPLE_CLASSES base \
             DATASET.NUM_SHOTS ${SHOTS} \
             #TEST.PER_CLASS_RESULT True \
