@@ -298,7 +298,7 @@ class CustomCLIP(nn.Module):
             ood_loc_feats = torch.gather(local_image_features, 1, idx_ood.unsqueeze(-1).expand(-1, -1, d))
             
             text_bias = self.bonder(l2p_loc, selected_loc_img_feats.detach())
-            text_bias = text_bias / text_bias.norm(dim=-1, keepdim=True)
+            text_bias = text_bias / text_bias.norm(dim=-1, keepdim=True).clamp(min=1e-6)
             alpha = self.cfg.lambda_value
             updated_proto = self.text_prototypes
 
@@ -312,15 +312,13 @@ class CustomCLIP(nn.Module):
             update_features = torch.cat([self.text_prototypes[0:1, :, :], update_features], dim=0)
             updated_proto = (1-proto_mask) * updated_proto + proto_mask * (alpha * updated_proto + (1-alpha) * update_features)
 
-            #updated_proto_norm = updated_proto / updated_proto.norm(dim=-1, keepdim=True)
             updated_proto_norm = updated_proto / updated_proto.norm(dim=-1, keepdim=True).clamp(min=1e-6)
             updated_proto_mean = updated_proto_norm.mean(dim=0)
-            updated_proto_mean_norm = updated_proto_mean / updated_proto_mean.norm(dim=-1, keepdim=True)
+            updated_proto_mean_norm = updated_proto_mean / updated_proto_mean.norm(dim=-1, keepdim=True).clamp(min=1e-6)
         else:
-            #updated_proto_norm = self.text_prototypes / self.text_prototypes.norm(dim=-1, keepdim=True)
             updated_proto_norm = self.text_prototypes / self.text_prototypes.norm(dim=-1, keepdim=True).clamp(min=1e-6)
             updated_proto_mean = updated_proto_norm.mean(dim=0)
-            updated_proto_mean_norm = updated_proto_mean / updated_proto_mean.norm(dim=-1, keepdim=True)
+            updated_proto_mean_norm = updated_proto_mean / updated_proto_mean.norm(dim=-1, keepdim=True).clamp(min=1e-6)
 
         logit_scale = self.logit_scale.exp()
         
