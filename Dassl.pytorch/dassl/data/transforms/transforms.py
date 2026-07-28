@@ -9,6 +9,8 @@ from torchvision.transforms import (
 )
 from torchvision.transforms.functional import InterpolationMode
 
+from PIL import ImageOps
+
 from .autoaugment import SVHNPolicy, CIFAR10Policy, ImageNetPolicy
 from .randaugment import RandAugment, RandAugment2, RandAugmentFixMatch
 
@@ -38,6 +40,64 @@ INTERPOLATION_MODES = {
     "bicubic": InterpolationMode.BICUBIC,
     "nearest": InterpolationMode.NEAREST,
 }
+
+class ResizeAndPad:
+    def __init__(self, size, interpolation, fill=0):
+        self.size = size
+        self.interpolation = interpolation
+        self.fill = fill
+
+    def __call__(self, img):
+        w, h = img.size
+        long_side = max(w, h)
+        scale = self.size / long_side
+        new_w, new_h = int(round(w * scale)), int(round(h * scale))
+        img = F.resize(img=img, size=[new_h, new_w], interpolation=self.interpolation)
+
+
+        pad_w = self.size - new_w
+        pad_h = self.size - new_h
+        left = pad_w // 2
+        right = pad_w - left
+        top = pad_h // 2
+        bottom = pad_h - top
+        return ImageOps.expand(img, border=(left, top, right, bottom), fill=self.fill)
+    
+
+class MultiCropSquare:
+    def __init__(self, size, interpolation, normalize, k=3, fill=0):
+        self.size = size  # vd (224, 224)
+        self.interpolation = interpolation
+        self.normalize = normalize
+        self.k = k
+        self.fill = fill
+        self.to_tensor = ToTensor()
+ 
+    def _get_square_crops(self, img):
+        w, h = img.size
+        side = min(w, h)
+        if w >= h:
+            positions = sorted(set([0, (w - side) // 2, w - side]))
+            crops = [img.crop((x, 0, x + side, side)) for x in positions]
+        else:
+            positions = sorted(set([0, (h - side) // 2, h - side]))
+            crops = [img.crop((0, y, side, y + side)) for y in positions]
+        while len(crops) < self.k:
+            crops.append(crops[-1])  # anh gan vuong: lap lai crop cuoi cho du K
+        crops = crops[: self.k]
+        crops.append(img)  # anh goc nguyen ven, chua resize; se bi meo
+            # ti le o buoc resize ben duoi neu anh khong vuong
+        return crops
+ 
+    def __call__(self, img):
+        crops = self._get_square_crops(img)
+        tensors = []
+        for c in crops:
+            c = F.resize(c, list(self.size), interpolation=self.interpolation)
+            t = self.to_tensor(c)
+            t = self.normalize(t)
+            tensors.append(t)
+        return torch.stack(tensors, dim=0)  # [K, C, H, W] hoac [K+1, C, H, W]
 
 
 class Random2DTranslation:
@@ -323,32 +383,66 @@ def _build_transform_train(cfg, choices, target_size, normalize):
     return tfm_train
 
 
+# def _build_transform_test(cfg, choices, target_size, normalize):
+#     print("Building transform_test")
+#     tfm_test = []
+
+#     interp_mode = INTERPOLATION_MODES[cfg.INPUT.INTERPOLATION]
+#     input_size = cfg.INPUT.SIZE
+
+#     print(f"+ resize the smaller edge to {max(input_size)}")
+#     tfm_test += [Resize(max(input_size), interpolation=interp_mode)]
+
+#     print(f"+ {target_size} center crop")
+#     tfm_test += [CenterCrop(input_size)]
+
+#     print("+ to torch tensor of range [0, 1]")
+#     tfm_test += [ToTensor()]
+
+#     if "normalize" in choices:
+#         print(
+#             f"+ normalization (mean={cfg.INPUT.PIXEL_MEAN}, std={cfg.INPUT.PIXEL_STD})"
+#         )
+#         tfm_test += [normalize]
+
+#     if "instance_norm" in choices:
+#         print("+ instance normalization")
+#         tfm_test += [InstanceNormalization()]
+
+#     tfm_test = Compose(tfm_test)
+
+#     return tfm_test
+
 def _build_transform_test(cfg, choices, target_size, normalize):
     print("Building transform_test")
-    tfm_test = []
-
     interp_mode = INTERPOLATION_MODES[cfg.INPUT.INTERPOLATION]
     input_size = cfg.INPUT.SIZE
-
-    print(f"+ resize the smaller edge to {max(input_size)}")
-    tfm_test += [Resize(max(input_size), interpolation=interp_mode)]
-
-    print(f"+ {target_size} center crop")
-    tfm_test += [CenterCrop(input_size)]
-
+    choices += ("multi_crop_test",)
+ 
+    if "multi_crop_test" in choices:
+        print("+ multi-crop test (3 vung vuong doc theo canh dai, khong pad, "
+              "khong meo ti le)")
+        print("+ to torch tensor of range [0, 1]")
+        print(f"+ normalization (mean={cfg.INPUT.PIXEL_MEAN}, std={cfg.INPUT.PIXEL_STD})")
+        return MultiCropSquare(size=input_size, interpolation=interp_mode, normalize=normalize, k=3)
+ 
+    tfm_test = []
+    print(f"+ resize long edge to {max(input_size)}, pad short edge to square")
+    tfm_test += [ResizeAndPad(size=max(input_size), interpolation=interp_mode, fill=0)]
+ 
     print("+ to torch tensor of range [0, 1]")
     tfm_test += [ToTensor()]
-
+ 
     if "normalize" in choices:
         print(
             f"+ normalization (mean={cfg.INPUT.PIXEL_MEAN}, std={cfg.INPUT.PIXEL_STD})"
         )
         tfm_test += [normalize]
-
+ 
     if "instance_norm" in choices:
         print("+ instance normalization")
         tfm_test += [InstanceNormalization()]
-
+ 
     tfm_test = Compose(tfm_test)
-
+ 
     return tfm_test

@@ -259,6 +259,7 @@ class CustomCLIP(nn.Module):
         # Bonder
         if cfg.is_bonder:
             self.bonder = CrossAttnBlock(512)
+            #self.bonder = CrossAttnBlock(512, drop=0.1, attn_drop=0.1)    #Dropout cho bonder
             self.bonder.to(self.dtype)
 
     def forward(self, image, mask=None, labels = None):
@@ -383,7 +384,8 @@ class LocProto(TrainerX):
             
             if cfg.is_bonder:
                 cfg.OPTIM2 = deepcopy(cfg.OPTIM)
-                cfg.OPTIM2.LR = cfg.OPTIM.LR
+                cfg.OPTIM2.LR = cfg.OPTIM.LR    # Phiên bản LR dùng chung
+                #cfg.OPTIM2.LR = 1e-3           # Phiên bản riêng cho bonder
                 self.optim2 = build_optimizer(self.model.bonder, cfg.OPTIM2)
                 self.sched2 = build_lr_scheduler(self.optim2, cfg.OPTIM2)
                 self.register_model("bonder_learner", self.model.bonder, self.optim2,
@@ -438,12 +440,13 @@ class LocProto(TrainerX):
 
             self.model_backward_and_update(loss)
 
+        output_ens = output_local + 0.05 * output
         loss_summary = {
             "loss": loss.item(),
             "loss_id": loss_id.item(),
             "loss_distil_img": loss_distil_img.item(),
             "loss_distil_text": loss_distil_text.item(),
-            "acc": compute_accuracy(output_local, label)[0].item(),
+            "acc": compute_accuracy(output_ens, label)[0].item(),
         }
 
         if (self.batch_idx + 1) == self.num_batches:
@@ -493,6 +496,53 @@ class LocProto(TrainerX):
             # set strict=False
             self._models[name].load_state_dict(state_dict, strict=False)
 
+    # @torch.no_grad()
+    # def test(self, split=None):
+    #     """A generic testing pipeline."""
+    #     self.model.image_features_store = []
+    #     self.set_model_mode("eval")
+    #     self.evaluator.reset()
+
+    #     if split is None:
+    #         split = self.cfg.TEST.SPLIT
+
+    #     if split == "val" and self.val_loader is not None:
+    #         data_loader = self.val_loader
+    #     elif split == "test":
+    #         split = "test"  # in case val_loader is None
+    #         data_loader = self.test_loader
+    #     else:
+    #         split = "train"
+    #         data_loader = self.train_loader_x
+
+    #     print(f"Evaluate on the *{split}* set")
+
+    #     #if self.cfg.is_bonder:
+    #     if self.cfg.use_refined:
+    #         self.model.text_prototypes = torch.load(osp.join(self.output_dir, 'proto.pth'))
+    #         print("Load refined text embedding")
+
+    #     for batch_idx, batch in enumerate(tqdm(data_loader)):
+    #         input, label = self.parse_batch_test(batch)
+    #         output = self.model_inference(input)
+    #         if len(output) >= 2:
+    #             #if self.cfg.is_bonder:
+    #             if self.cfg.use_refined:
+    #                 output = output[1] + 0.05 * output[0]
+    #             else:
+    #                 output = output[0]
+    #         self.label.append(label)
+    #         self.evaluator.process(output, label)
+
+    #     results = self.evaluator.evaluate()
+
+    #     for k, v in results.items():
+    #         tag = f"{split}/{k}"
+    #         self.write_scalar(tag, v, self.epoch)
+
+    #     return list(results.values())[0]
+
+
     @torch.no_grad()
     def test(self, split=None):
         """A generic testing pipeline."""
@@ -514,30 +564,46 @@ class LocProto(TrainerX):
 
         print(f"Evaluate on the *{split}* set")
 
-        #if self.cfg.is_bonder:
         if self.cfg.use_refined:
             self.model.text_prototypes = torch.load(osp.join(self.output_dir, 'proto.pth'))
             print("Load refined text embedding")
 
         for batch_idx, batch in enumerate(tqdm(data_loader)):
             input, label = self.parse_batch_test(batch)
+
+            multi_crop = input.dim() == 5
+            if multi_crop:
+                bsz, k_crops = input.shape[0], input.shape[1]
+                input = input.view(bsz * k_crops, *input.shape[2:])
+
             output = self.model_inference(input)
             if len(output) >= 2:
-                #if self.cfg.is_bonder:
                 if self.cfg.use_refined:
                     output = output[1] + 0.05 * output[0]
                 else:
                     output = output[0]
+
+            if multi_crop:
+                output = output.view(bsz, k_crops, -1)
+                output = F.softmax(output, dim=-1)
+                if k_crops == 4:
+                    crop3_avg = output[:, :3, :].mean(dim=1)
+                    full_view = output[:, 3, :]
+                    output = 0.7 * crop3_avg + 0.3 * full_view
+                else:
+                    output = output.mean(dim=1)
+
             self.label.append(label)
             self.evaluator.process(output, label)
 
         results = self.evaluator.evaluate()
-
+ 
         for k, v in results.items():
             tag = f"{split}/{k}"
             self.write_scalar(tag, v, self.epoch)
-
+ 
         return list(results.values())[0]
+
 
     @torch.no_grad()
     def test_ood(self, data_loader, T):
@@ -558,18 +624,69 @@ class LocProto(TrainerX):
             else:
                 images = images.cuda()
             images = images.cuda()
+
+            multi_crop = images.dim() == 5
+            if multi_crop:
+                bsz, k_crops = images.shape[0], images.shape[1]
+                images = images.view(bsz * k_crops, *images.shape[2:])
+
             output, output_local, _, _, _, _, _, _, _ = self.model_inference(images)
-            #if self.cfg.is_bonder:
             if self.cfg.use_refined:
                 output = output_local + 0.05 * output
             output /= 100.0
             output_local /= 100.0
-            smax_global = to_np(F.softmax(output/T, dim=-1))  
-            smax_local = to_np(F.softmax(output_local/T, dim=-1))
+            smax_global = F.softmax(output/T, dim=-1)
+            smax_local = F.softmax(output_local/T, dim=-1)
+
+            if multi_crop:
+                smax_global = smax_global.view(bsz, k_crops, -1)
+                smax_local = smax_local.view(bsz, k_crops, -1)
+                if k_crops == 4:
+                    smax_global = 0.7 * smax_global[:, :3, :].mean(dim=1) + 0.3 * smax_global[:, 3, :]
+                    smax_local = 0.7 * smax_local[:, :3, :].mean(dim=1) + 0.3 * smax_local[:, 3, :]
+                else:
+                    smax_global = smax_global.mean(dim=1)
+                    smax_local = smax_local.mean(dim=1)
+
+            smax_global = to_np(smax_global)
+            smax_local = to_np(smax_local)
             mcm_global_score = -np.max(smax_global, axis=1)
             mcm_score.append(mcm_global_score)
 
         return concat(mcm_score)[:len(data_loader.dataset)].copy(), concat(mcm_score)[:len(data_loader.dataset)].copy(), concat(mcm_score)[:len(data_loader.dataset)].copy(), concat(mcm_score)[:len(data_loader.dataset)].copy()
+
+
+    # @torch.no_grad()
+    # def test_ood(self, data_loader, T):
+    #     """Test-time OOD detection pipeline."""
+    #     self.model.image_features_store = []
+    #     to_np = lambda x: x.data.cpu().numpy()
+    #     concat = lambda x: np.concatenate(x, axis=0)
+
+    #     self.set_model_mode("eval")
+    #     self.evaluator.reset()
+
+    #     glmcm_score = []
+    #     mcm_score = []
+    #     for batch_idx, batch in enumerate(tqdm(data_loader)):
+    #         (images, labels, *id_flag) = batch
+    #         if isinstance(images, str):
+    #             images, label = self.parse_batch_test(batch)
+    #         else:
+    #             images = images.cuda()
+    #         images = images.cuda()
+    #         output, output_local, _, _, _, _, _, _, _ = self.model_inference(images)
+    #         #if self.cfg.is_bonder:
+    #         if self.cfg.use_refined:
+    #             output = output_local + 0.05 * output
+    #         output /= 100.0
+    #         output_local /= 100.0
+    #         smax_global = to_np(F.softmax(output/T, dim=-1))  
+    #         smax_local = to_np(F.softmax(output_local/T, dim=-1))
+    #         mcm_global_score = -np.max(smax_global, axis=1)
+    #         mcm_score.append(mcm_global_score)
+
+    #     return concat(mcm_score)[:len(data_loader.dataset)].copy(), concat(mcm_score)[:len(data_loader.dataset)].copy(), concat(mcm_score)[:len(data_loader.dataset)].copy(), concat(mcm_score)[:len(data_loader.dataset)].copy()
 
     @torch.no_grad()
     def test_ood1(self, data_loader, T):
